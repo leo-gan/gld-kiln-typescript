@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exit 0
+cd "$(dirname "$0")/.."
+node --test test/*.test.ts
