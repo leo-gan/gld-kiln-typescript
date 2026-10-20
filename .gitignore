@@ -1,0 +1,17 @@
+temp/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+site/
+node_modules/
+dist/
+build/
+coverage/
+tests/generated/
+*.tsbuildinfo
+.DS_Store
+.idea/
+.vscode/
+*.swp
