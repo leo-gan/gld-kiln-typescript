@@ -1,6 +1,6 @@
 {
   "name": "gld-kiln",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Positional little-endian Kiln codec for TypeScript",
   "type": "module",
   "license": "MIT",
