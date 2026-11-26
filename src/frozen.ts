@@ -25,7 +25,16 @@ import {
 import { KilnError } from "./error.ts";
 import { typeHash } from "./hashing.ts";
 import type { Field, Schema } from "./schema.ts";
-import { compileDecode, compileEncode, readStr, type Sink } from "./structplan.ts";
+import {
+  allocBuf,
+  asFastBuf,
+  compileDecode,
+  compileEncode,
+  readStr,
+  type CompiledDecoder,
+  type CompiledEncoder,
+  type Sink,
+} from "./structplan.ts";
 import { CAP, HEADER, decodeTensors, encodeTensors, type TensorIn } from "./tensor.ts";
 
 const WIDTH: Record<string, number> = {
@@ -202,13 +211,10 @@ function bytesLess(a: Uint8Array, b: Uint8Array): boolean {
   return a.length < b.length;
 }
 
-const encodePlans = new WeakMap<object, ((w: Sink, value: Record<string, unknown>, cap: number) => void) | null>();
-const decodePlans = new WeakMap<
-  object,
-  ((buf: Uint8Array, cap: number, trusted: boolean) => [Record<string, unknown>, number]) | null
->();
+const encodePlans = new WeakMap<object, CompiledEncoder | null>();
+const decodePlans = new WeakMap<object, CompiledDecoder | null>();
 
-function encoderFor(schema: Schema) {
+function encoderFor(schema: Schema): CompiledEncoder | null {
   const key = schema as object;
   if (encodePlans.has(key)) {
     return encodePlans.get(key) ?? null;
@@ -218,7 +224,7 @@ function encoderFor(schema: Schema) {
   return plan;
 }
 
-function decoderFor(schema: Schema) {
+function decoderFor(schema: Schema): CompiledDecoder | null {
   const key = schema as object;
   if (decodePlans.has(key)) {
     return decodePlans.get(key) ?? null;
@@ -228,19 +234,21 @@ function decoderFor(schema: Schema) {
   return plan;
 }
 
-export class Writer {
+export class Writer implements Sink {
   buf: Uint8Array;
+  dv: DataView;
   end = 0;
 
   constructor(capacity = 64) {
-    this.buf = new Uint8Array(capacity);
+    this.buf = allocBuf(capacity);
+    this.dv = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
   }
 
   encode(schema: Schema, value: unknown, cap = CAP): Uint8Array {
     this.end = 0;
     const plan = encoderFor(schema);
     if (plan) {
-      plan(this, value as Record<string, unknown>, cap);
+      plan(this, value, cap);
       return this.buf.subarray(0, this.end);
     }
     this.write(schema, value, cap, 0);
@@ -274,9 +282,10 @@ export class Writer {
     if (cap < need) {
       cap = need;
     }
-    const grown = new Uint8Array(cap);
+    const grown = allocBuf(cap);
     grown.set(this.buf.subarray(0, this.end), 0);
     this.buf = grown;
+    this.dv = new DataView(grown.buffer, grown.byteOffset, grown.byteLength);
   }
 
   private u32(value: number): void {
@@ -438,6 +447,80 @@ export interface CodecOptions {
   trusted?: boolean;
 }
 
+export class Codec<T = unknown> {
+  private readonly schema: Schema;
+  private readonly enc: CompiledEncoder | null;
+  private readonly dec: CompiledDecoder | null;
+  private readonly writer: Writer;
+  private readonly cap: number;
+  private readonly standalone: boolean;
+  private readonly trusted: boolean;
+  private lastBuf: ArrayBufferLike | null = null;
+  private lastOff = -1;
+  private lastLen = -1;
+  private lastDv: DataView | null = null;
+
+  constructor(schema: Schema, opts: CodecOptions = {}, capacity = 256) {
+    this.schema = schema;
+    this.enc = encoderFor(schema);
+    this.dec = decoderFor(schema);
+    this.writer = new Writer(capacity);
+    this.cap = opts.cap ?? CAP;
+    this.standalone = opts.standalone !== false;
+    this.trusted = opts.trusted === true;
+  }
+
+  /** Encode into this codec's reused buffer and return a subarray view of the encoded bytes. */
+  encode(value: T): Uint8Array {
+    const w = this.writer;
+    if (this.enc) {
+      w.end = 0;
+      this.enc(w, value, this.cap);
+      return w.buf.subarray(0, w.end);
+    }
+    return w.encode(this.schema, value, this.cap);
+  }
+
+  /** Encode into a caller-supplied Writer and return a subarray view. */
+  encodeInto(writer: Writer, value: T): Uint8Array {
+    if (this.enc) {
+      writer.end = 0;
+      this.enc(writer, value, this.cap);
+      return writer.buf.subarray(0, writer.end);
+    }
+    return writer.encode(this.schema, value, this.cap);
+  }
+
+  decode(buf: Uint8Array): T {
+    if (this.dec) {
+      const fast = asFastBuf(buf);
+      let dv = this.lastDv;
+      if (
+        dv === null ||
+        this.lastBuf !== fast.buffer ||
+        this.lastOff !== fast.byteOffset ||
+        this.lastLen !== fast.byteLength
+      ) {
+        dv = new DataView(fast.buffer, fast.byteOffset, fast.byteLength);
+        this.lastBuf = fast.buffer;
+        this.lastOff = fast.byteOffset;
+        this.lastLen = fast.byteLength;
+        this.lastDv = dv;
+      }
+      return this.dec(fast, dv, this.cap, this.trusted, this.standalone) as T;
+    }
+    return decode(this.schema, buf, {
+      cap: this.cap,
+      standalone: this.standalone,
+      trusted: this.trusted,
+    }) as T;
+  }
+}
+
+export function compile<T = unknown>(schema: Schema, opts: CodecOptions = {}, capacity = 256): Codec<T> {
+  return new Codec<T>(schema, opts, capacity);
+}
+
 export function encode(schema: Schema, value: unknown, cap = CAP): Uint8Array {
   const writer = new Writer();
   return Uint8Array.from(writer.encode(schema, value, cap));
@@ -454,13 +537,12 @@ export function decode(schema: Schema, buf: Uint8Array, opts: CodecOptions = {})
   const trusted = opts.trusted === true;
   const plan = decoderFor(schema);
   if (plan) {
-    const [value, end] = plan(buf, cap, trusted);
-    if (standalone && end !== buf.length) {
-      throw new KilnError("TRAILING");
-    }
-    return value;
+    const fast = asFastBuf(buf);
+    const dv = new DataView(fast.buffer, fast.byteOffset, fast.byteLength);
+    const result = plan(fast, dv, cap, trusted, standalone);
+    return standalone ? result : (result as [unknown, number])[0];
   }
-  const [value, end] = readValue(schema, buf, 0, cap, 0, trusted);
+  const [value, end] = readValue(schema, asFastBuf(buf), 0, cap, 0, trusted);
   if (standalone && end !== buf.length) {
     throw new KilnError("TRAILING");
   }

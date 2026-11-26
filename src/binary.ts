@@ -195,3 +195,68 @@ export function fitInt(v: bigint): number | bigint {
 export function asInt(v: number | bigint): bigint {
   return typeof v === "bigint" ? v : BigInt(Math.trunc(v));
 }
+
+export function readI64Fit(buf: Uint8Array, o: number): number | bigint {
+  const lo = (buf[o] | (buf[o + 1] << 8) | (buf[o + 2] << 16) | (buf[o + 3] << 24)) >>> 0;
+  const hi = buf[o + 4] | (buf[o + 5] << 8) | (buf[o + 6] << 16) | (buf[o + 7] << 24);
+  if (hi >= -0x1fffff && hi <= 0x1fffff) {
+    return lo + hi * TWO32;
+  }
+  if (hi === -0x200000 && lo !== 0) {
+    return lo - 9007199254740992;
+  }
+  return fitInt((BigInt(hi) << 32n) | BigInt(lo));
+}
+
+export function readU64Fit(buf: Uint8Array, o: number): number | bigint {
+  const lo = (buf[o] | (buf[o + 1] << 8) | (buf[o + 2] << 16) | (buf[o + 3] << 24)) >>> 0;
+  const hi = (buf[o + 4] | (buf[o + 5] << 8) | (buf[o + 6] << 16) | (buf[o + 7] << 24)) >>> 0;
+  if (hi <= 0x1fffff) {
+    return lo + hi * TWO32;
+  }
+  return fitInt(BigInt(lo) | (BigInt(hi) << 32n));
+}
+
+export function writeI64Fast(buf: Uint8Array, o: number, v: number | bigint): void {
+  if (typeof v === "number") {
+    if (v >= -9007199254740991 && v <= 9007199254740991) {
+      const t = Math.trunc(v);
+      const lo = t >>> 0;
+      const hi = Math.floor(t / TWO32);
+      buf[o] = lo;
+      buf[o + 1] = lo >>> 8;
+      buf[o + 2] = lo >>> 16;
+      buf[o + 3] = lo >>> 24;
+      buf[o + 4] = hi;
+      buf[o + 5] = hi >>> 8;
+      buf[o + 6] = hi >>> 16;
+      buf[o + 7] = hi >>> 24;
+      return;
+    }
+    writeI64(buf, o, BigInt(Math.trunc(v)));
+    return;
+  }
+  writeI64(buf, o, v);
+}
+
+export function writeU64Fast(buf: Uint8Array, o: number, v: number | bigint): void {
+  if (typeof v === "number") {
+    if (v >= 0 && v <= 9007199254740991) {
+      const t = Math.trunc(v);
+      const lo = t >>> 0;
+      const hi = Math.floor(t / TWO32);
+      buf[o] = lo;
+      buf[o + 1] = lo >>> 8;
+      buf[o + 2] = lo >>> 16;
+      buf[o + 3] = lo >>> 24;
+      buf[o + 4] = hi;
+      buf[o + 5] = hi >>> 8;
+      buf[o + 6] = hi >>> 16;
+      buf[o + 7] = hi >>> 24;
+      return;
+    }
+    writeU64(buf, o, BigInt(Math.trunc(v)));
+    return;
+  }
+  writeU64(buf, o, v);
+}
