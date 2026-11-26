@@ -3,16 +3,18 @@ import { KilnError } from "./error.ts";
 import { typeHash } from "./hashing.ts";
 import { parseTypeText, schemaFromCase, schemaFromJson } from "./schema.ts";
 import { CAP, HEADER, decodeTensors, encodeTensors } from "./tensor.ts";
-import { Writer, decode, decodeFramed, encode, encodeFramed, minSize } from "./frozen.ts";
+import { Codec, Writer, compile, decode, decodeFramed, encode, encodeFramed, minSize } from "./frozen.ts";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.2.1";
 
 export {
   CAP,
   HEADER,
+  Codec,
   FloatBits,
   KilnError,
   Writer,
+  compile,
   decode,
   decodeFramed,
   decodeTensors,
